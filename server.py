@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 import github_api
+import github_results
 
 
 mcp = MCPServer("github", instructions="Поиск репозиториев, чтение файлов, issues и pull requests через GitHub API.")
@@ -34,7 +35,7 @@ async def _get(path: str, **params: Any) -> tuple[Any, bool]:
 async def get_repository(owner: Owner, repo: Repo) -> dict[str, Any]:
     """Получить сведения о репозитории: описание, URL, язык, звёзды и ветку по умолчанию."""
     data, _ = await _get(f"/repos/{owner}/{repo}")
-    return data
+    return github_results.repository(data)
 
 
 @mcp.tool(annotations=read_only)
@@ -45,17 +46,18 @@ async def list_issues(
     page: Page = 1,
     per_page: PerPage = 20,
 ) -> dict[str, Any]:
-    """Получить страницу issues без pull requests, от новых к старым.
+    """Получить краткую страницу issues без pull requests, от новых к старым.
 
     GitHub считает pull requests при пагинации: issues может быть меньше per_page
     или даже ноль. Для продолжения используйте next_page, а не длину issues.
+    Полное описание отдельного issue доступно через get_issue.
     """
     data, has_next = await _get(
         f"/repos/{owner}/{repo}/issues", state=state, page=page,
         per_page=per_page, sort="created", direction="desc",
     )
     return {
-        "issues": [item for item in data if "pull_request" not in item],
+        "issues": [github_results.issue(item) for item in data if "pull_request" not in item],
         "page": page,
         "next_page": page + 1 if has_next else None,
     }
@@ -67,7 +69,7 @@ async def get_issue(owner: Owner, repo: Repo, issue_number: IssueNumber) -> dict
     data, _ = await _get(f"/repos/{owner}/{repo}/issues/{issue_number}")
     if "pull_request" in data:
         raise ToolError("Этот номер относится к pull request, а не issue.")
-    return data
+    return github_results.issue(data, details=True)
 
 
 @mcp.tool(annotations=read_only)
@@ -83,7 +85,7 @@ async def search_repositories(
         raise ToolError("GitHub Search позволяет получить только первые 1000 результатов.")
     data, has_next = await _get("/search/repositories", q=query, page=page, per_page=per_page)
     return {
-        "repositories": data["items"],
+        "repositories": [github_results.repository(item) for item in data["items"]],
         "total_count": data["total_count"],
         "incomplete_results": data["incomplete_results"],
         "page": page,
@@ -99,12 +101,19 @@ async def list_pull_requests(
     page: Page = 1,
     per_page: PerPage = 20,
 ) -> dict[str, Any]:
-    """Получить страницу pull requests от новых к старым, включая автора и ветки."""
+    """Получить краткую страницу pull requests от новых к старым, включая автора и ветки.
+
+    Полное описание и статистика PR доступны через get_pull_request.
+    """
     data, has_next = await _get(
         f"/repos/{owner}/{repo}/pulls", state=state, page=page,
         per_page=per_page, sort="created", direction="desc",
     )
-    return {"pull_requests": data, "page": page, "next_page": page + 1 if has_next else None}
+    return {
+        "pull_requests": [github_results.pull_request(item) for item in data],
+        "page": page,
+        "next_page": page + 1 if has_next else None,
+    }
 
 
 @mcp.tool(annotations=read_only)
@@ -115,7 +124,7 @@ async def get_pull_request(
 ) -> dict[str, Any]:
     """Получить pull request: описание, ветки, состояние слияния и статистику изменений."""
     data, _ = await _get(f"/repos/{owner}/{repo}/pulls/{pull_number}")
-    return data
+    return github_results.pull_request(data, details=True)
 
 
 @mcp.tool(annotations=read_only)
@@ -136,9 +145,13 @@ async def get_repository_content(
     params = {"ref": ref} if ref is not None else {}
     data, _ = await _get(f"/repos/{owner}/{repo}/contents/{quote(path, safe='/')}", **params)
     if isinstance(data, list):
-        return {"type": "directory", "entries": data, "limit_reached": len(data) >= 1000}
+        return {
+            "type": "directory",
+            "entries": [github_results.content(item) for item in data],
+            "limit_reached": len(data) >= 1000,
+        }
     if data.get("type") != "file":
-        return data
+        return github_results.content(data)
     if data.get("size", 0) > 1_000_000 or data.get("encoding") != "base64":
         raise ToolError("Чтение содержимого поддерживается только для файлов до 1 МБ в base64.")
     try:
@@ -146,9 +159,9 @@ async def get_repository_content(
     except (binascii.Error, KeyError, ValueError):
         raise ToolError("GitHub вернул некорректное содержимое файла.") from None
     try:
-        return {**data, "content": raw.decode("utf-8"), "encoding": "utf-8"}
+        return {**github_results.content(data), "content": raw.decode("utf-8"), "encoding": "utf-8"}
     except UnicodeDecodeError:
-        return data
+        return github_results.content(data)
 
 
 if __name__ == "__main__":

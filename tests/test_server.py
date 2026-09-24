@@ -57,6 +57,22 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests[0].url.path, "/repos/octocat/Hello-World")
         self.assertEqual(self.requests[0].headers["Authorization"], "Bearer test-secret")
 
+    async def test_repository_keeps_useful_fields_without_service_metadata(self):
+        self.payload = {
+            "full_name": "o/r", "description": "Example", "html_url": "https://github.com/o/r",
+            "topics": ["mcp"], "stargazers_count": 42, "default_branch": "main",
+            "owner": {"login": "o", "html_url": "https://github.com/o", "followers_url": "unused"},
+            "license": {"name": "MIT License", "spdx_id": "MIT", "node_id": "unused"},
+            "permissions": {"admin": True}, "events_url": "unused", "node_id": "unused",
+        }
+        result = await self.call_tool("get_repository", {"owner": "o", "repo": "r"})
+        self.assertEqual(result.structured_content, {
+            "full_name": "o/r", "description": "Example", "html_url": "https://github.com/o/r",
+            "topics": ["mcp"], "stargazers_count": 42, "default_branch": "main",
+            "owner": {"login": "o", "html_url": "https://github.com/o"},
+            "license": {"name": "MIT License", "spdx_id": "MIT"},
+        })
+
     async def test_without_token(self):
         with patch.dict(os.environ, {"GITHUB_TOKEN": ""}):
             await self.call_tool("get_repository", {"owner": "o", "repo": "r"})
@@ -80,6 +96,26 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.payload["pull_request"] = {}
         result = await self.call_tool("get_issue", {"owner": "o", "repo": "r", "issue_number": 3})
         self.assertTrue(result.is_error)
+
+    async def test_issue_summary_then_details_preserve_full_body(self):
+        issue = {
+            "number": 3, "title": "Bug", "body": "Подробное описание " * 1000,
+            "user": {"login": "octocat", "avatar_url": "unused"},
+            "labels": [{"name": "bug", "description": "Something is wrong", "id": 42}],
+            "assignees": [{"login": "maintainer", "node_id": "unused"}],
+            "milestone": None, "repository_url": "unused",
+        }
+        self.payload = [issue]
+        summary = await self.call_tool("list_issues", {"owner": "o", "repo": "r"})
+        summary_issue = summary.structured_content["issues"][0]
+        self.assertNotIn("body", summary_issue)
+        self.assertEqual(summary_issue["user"], {"login": "octocat"})
+        self.assertEqual(summary_issue["labels"], [{"name": "bug", "description": "Something is wrong"}])
+        self.assertEqual(summary_issue["assignees"], [{"login": "maintainer"}])
+        self.assertNotIn("repository_url", summary_issue)
+        self.payload = issue
+        details = await self.call_tool("get_issue", {"owner": "o", "repo": "r", "issue_number": 3})
+        self.assertEqual(details.structured_content, {**summary_issue, "body": issue["body"]})
 
     async def test_invalid_arguments_do_not_reach_github(self):
         for extra in ({"per_page": 101}, {"page": 0}, {"state": "invalid"}, {"owner": "../x"}):
@@ -127,6 +163,26 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.structured_content, self.payload)
         self.assertEqual(self.requests[-1].url.path, "/repos/o/r/pulls/5")
 
+    async def test_pull_request_keeps_branches_and_statistics_without_nested_repos(self):
+        pull = {
+            "number": 5, "title": "Fix", "body": "Complete description", "merged": True,
+            "head": {"label": "o:fix", "ref": "fix", "sha": "abc", "repo": {"huge": "unused"}},
+            "base": {"ref": "main", "sha": "def", "repo": {"huge": "unused"}},
+            "commits": 2, "additions": 10, "deletions": 4, "changed_files": 1,
+            "_links": {"self": "unused"},
+        }
+        self.payload = [pull]
+        summary = await self.call_tool("list_pull_requests", {"owner": "o", "repo": "r"})
+        item = summary.structured_content["pull_requests"][0]
+        self.assertEqual(item["head"], {"label": "o:fix", "ref": "fix", "sha": "abc"})
+        self.assertEqual(item["base"], {"ref": "main", "sha": "def"})
+        self.assertNotIn("body", item)
+        self.assertNotIn("_links", item)
+        self.payload = pull
+        details = await self.call_tool("get_pull_request", {"owner": "o", "repo": "r", "pull_number": 5})
+        self.assertEqual(details.structured_content, {**item, "body": pull["body"]})
+        self.assertEqual(details.structured_content["changed_files"], 1)
+
     async def test_content_text_binary_and_directory(self):
         self.payload = {"type": "file", "encoding": "base64", "size": 12,
                         "content": base64.b64encode("Привет".encode()).decode()}
@@ -140,9 +196,9 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.payload["content"] = base64.b64encode(b"\xff\x00").decode()
         result = await self.call_tool("get_repository_content", {"owner": "o", "repo": "r", "path": "a.bin"})
         self.assertEqual(result.structured_content["encoding"], "base64")
-        self.payload = [{"type": "dir", "path": "src"}]
+        self.payload = [{"type": "dir", "path": "src", "_links": {"git": "unused"}}]
         result = await self.call_tool("get_repository_content", {"owner": "o", "repo": "r"})
-        self.assertEqual(result.structured_content["entries"], self.payload)
+        self.assertEqual(result.structured_content["entries"], [{"type": "dir", "path": "src"}])
         self.assertFalse(result.structured_content["limit_reached"])
 
     async def test_content_errors(self):

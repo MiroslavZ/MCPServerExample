@@ -45,17 +45,28 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(result.status_code, (400, 403, 421))
 
     async def test_mcp_over_http(self):
-        app = create_app(mcp, Settings(access_token="test-mcp-secret"))
+        app = create_app(mcp, Settings(
+            access_token="test-mcp-secret", allowed_hosts=["mcp.example.com"],
+        ))
         with patch("github_api.get", return_value=({"full_name": "o/r"}, False)) as github:
             async with app.router.lifespan_context(app):
                 async with httpx.AsyncClient(
                     transport=httpx.ASGITransport(app=app),
                     headers={"Authorization": "Bearer test-mcp-secret"},
                 ) as http:
-                    async with streamable_http_client("http://localhost:8000/mcp", http_client=http) as streams:
+                    # HTTPS URL и Host, которые приложение использует за reverse proxy.
+                    async with streamable_http_client("https://mcp.example.com/mcp", http_client=http) as streams:
                         async with ClientSession(*streams) as client:
                             await client.initialize()
-                            self.assertEqual(len((await client.list_tools()).tools), 7)
+                            tools = (await client.list_tools()).tools
+                            self.assertEqual(len(tools), 7)
+                            repository_tool = next(tool for tool in tools if tool.name == "get_repository")
+                            self.assertEqual(repository_tool.input_schema["required"], ["owner", "repo"])
+                            self.assertTrue(repository_tool.annotations.read_only_hint)
+                    # Приложение может получить каталог и выполнить вызов в разных сессиях.
+                    async with streamable_http_client("https://mcp.example.com/mcp", http_client=http) as streams:
+                        async with ClientSession(*streams) as client:
+                            await client.initialize()
                             result = await client.call_tool("get_repository", {"owner": "o", "repo": "r"})
                             self.assertFalse(result.is_error)
                             self.assertEqual(result.structured_content, {"full_name": "o/r"})

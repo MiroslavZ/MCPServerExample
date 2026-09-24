@@ -8,11 +8,11 @@
 
 | Инструмент | Параметры | Результат |
 | --- | --- | --- |
-| `get_repository` | `owner`, `repo` | Данные репозитория: описание, URL, язык, звёзды и другие поля GitHub |
+| `get_repository` | `owner`, `repo` | Данные репозитория: описание, URL, язык, звёзды, лицензия и основная ветка |
 | `search_repositories` | `query`, `page=1`, `per_page=20` | `repositories`, `total_count`, `incomplete_results`, `page`, `next_page` |
-| `list_issues` | `owner`, `repo`, `state="open"`, `page=1`, `per_page=20` | `issues`, `page`, `next_page` |
+| `list_issues` | `owner`, `repo`, `state="open"`, `page=1`, `per_page=20` | Краткие `issues` без body, `page`, `next_page` |
 | `get_issue` | `owner`, `repo`, `issue_number` | Описание, автор, метки и состояние issue |
-| `list_pull_requests` | `owner`, `repo`, `state="open"`, `page=1`, `per_page=20` | `pull_requests`, `page`, `next_page` |
+| `list_pull_requests` | `owner`, `repo`, `state="open"`, `page=1`, `per_page=20` | Краткие `pull_requests` без body, `page`, `next_page` |
 | `get_pull_request` | `owner`, `repo`, `pull_number` | Описание, ветки, состояние слияния и статистика PR |
 | `get_repository_content` | `owner`, `repo`, `path=""`, `ref=null` | Содержимое файла либо каталог с `entries` и `limit_reached` |
 
@@ -22,6 +22,11 @@
 `ref` — ветка, тег или SHA коммита; без него используется основная ветка.
 Типы, описания и ограничения параметров доступны через MCP `tools/list`.
 Инструменты зарегистрированы декораторами `@mcp.tool()` и возвращают структурированный JSON.
+Ответы содержат полезные поля GitHub и ссылки `html_url`, без служебных URL,
+аватаров и вложенных копий репозиториев. Автор представлен объектом с `login`
+и `html_url`, метки — объектами с `name` и `description`, ветки PR — `label`, `ref`, `sha`.
+Поля, отсутствующие в GitHub, не добавляются. Полные описания issues/PR доступны
+через `get_issue` / `get_pull_request`, без обрезки; списки не загружают их в контекст LLM.
 
 Ограничения:
 
@@ -37,6 +42,9 @@
 - Ошибки API возвращаются как MCP tool errors (`is_error=True` в Python SDK).
 
 ## Установка и локальный запуск
+
+Команды этого раздела выполняются из каталога `MCPServerExample`.
+Из корня общего проекта сначала выполните `cd MCPServerExample`.
 
 PowerShell:
 
@@ -83,7 +91,7 @@ GITHUB_TOKEN=ваш_github_токен
 
 ```dotenv
 GITHUB_TOKEN=ваш_github_токен
-MCP_HOST=0.0.0.0
+MCP_HOST=127.0.0.1
 MCP_PORT=8000
 MCP_ACCESS_TOKEN=отдельный_случайный_секрет
 MCP_ALLOWED_HOSTS=mcp.example.com,mcp.example.com:443,127.0.0.1:*,localhost:*
@@ -97,16 +105,78 @@ MCP_ALLOWED_ORIGINS=
 На localhost он необязателен; если задан, проверяется и локально.
 Без корректного секрета сервер возвращает HTTP 401.
 
-Для публичного доступа настройте HTTPS reverse proxy (например, Nginx/Caddy) на
-порт 8000. В AWS Security Group разрешите HTTPS на 443, а внутренний порт 8000
-оставьте доступным только proxy. Proxy должен сохранять заголовки `Authorization`
-и `Host`. Если proxy на той же VM, можно использовать `MCP_HOST=127.0.0.1`,
-сохранив `MCP_ACCESS_TOKEN`.
+Для VPS с proxy на той же машине используйте показанный `MCP_HOST=127.0.0.1`:
+сам MCP слушает только loopback, а внешний доступ проходит через HTTPS и Bearer.
+Если proxy в другом контейнере/на другом хосте, можно задать `MCP_HOST=0.0.0.0`
+и разрешить вход на 8000 только от proxy. При публикации через proxy токен нужен
+даже при loopback bind: проверка настроек не может определить наличие proxy.
+
+Пример развёртывания на Linux VPS:
+
+1. Скопируйте каталог сервера в `/opt/github-mcp`, установите зависимости в
+   `/opt/github-mcp/venv` по инструкции выше. Создайте отдельного системного
+   пользователя `github-mcp`, дайте ему чтение кода и `.env`; для `.env`
+   установите владельца `github-mcp` и права `600`.
+2. Укажите настройки из примера выше в `/opt/github-mcp/.env`.
+3. Создайте `/etc/systemd/system/github-mcp.service`:
+
+```ini
+[Unit]
+Description=GitHub MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=github-mcp
+Group=github-mcp
+WorkingDirectory=/opt/github-mcp
+ExecStart=/opt/github-mcp/venv/bin/python /opt/github-mcp/server.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Запустите службу:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now github-mcp
+sudo systemctl status github-mcp
+```
+
+4. Установите Caddy по [официальной инструкции](https://caddyserver.com/docs/install).
+   Направьте DNS `mcp.example.com` на IP VPS. Разрешите входящие TCP 80 и 443
+   в firewall VPS и правилах облака. Порт 8000 наружу не открывайте.
+   Добавьте в `/etc/caddy/Caddyfile`, подставив свой домен:
+
+```caddyfile
+mcp.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+Caddy получает HTTPS-сертификат автоматически при корректном DNS и доступных
+портах. Для этого HTTP upstream заголовки `Host` и `Authorization` сохраняются;
+переписывать `/mcp` не требуется. См. [настройку reverse proxy](https://caddyserver.com/docs/quick-starts/reverse-proxy).
+После замены домена также обновите `MCP_ALLOWED_HOSTS` и перезапустите службу:
+`sudo systemctl restart github-mcp`.
 
 `MCP_ALLOWED_HOSTS` содержит значения HTTP Host без схемы и пути, через запятую.
-Для доступа по IP в закрытой сети добавьте `IP_ВАШЕЙ_VM:8000` и используйте
-`http://IP_ВАШЕЙ_VM:8000/mcp`. Через публичный интернет передавайте секрет по HTTPS;
-альтернатива — VPN или SSH-туннель.
+Приложение LLMAgentExample допускает HTTP только для loopback-адресов;
+удалённый URL должен начинаться с HTTPS. Для разработки без домена можно
+пробросить порт через SSH (`ssh -N -L 8000:127.0.0.1:8000 user@VPS`) и подключаться
+к `http://127.0.0.1:8000/mcp`; токен сервера при этом по-прежнему передаётся.
 Если клиент отправляет Origin, добавьте его точное значение, например
 `MCP_ALLOWED_ORIGINS=https://agent.example.com`. Обычный Python-клиент Origin не отправляет.
 
@@ -117,10 +187,62 @@ MCP_ALLOWED_ORIGINS=
 
 ## Как подключить агент
 
-В настройках MCP-клиента выберите **Streamable HTTP**, URL
-`https://mcp.example.com/mcp` и заголовок `Authorization: Bearer <секрет>`.
-Конкретный формат конфигурации зависит от приложения. Старые настройки
-`command`/`args` для stdio больше не используются.
+Сервер запускается отдельно от агента — локально или на VPS. Сначала можно
+проверить весь сценарий на одном компьютере, затем заменить URL на HTTPS.
+
+В `.env` **в корне LLMAgentExample** добавьте `MCP_ACCESS_TOKEN` с тем же значением,
+что у сервера. Для локального сервера без авторизации этот шаг не нужен.
+`GITHUB_TOKEN` хранится только в `MCPServerExample/.env` на машине сервера.
+После изменения корневого `.env` перезапустите агент.
+
+Из корня проекта запустите веб-приложение:
+
+```powershell
+.\venv\Scripts\python.exe -m llm_agent.web
+```
+
+Откройте `http://127.0.0.1:8080`, затем **MCP → Добавить MCP**:
+
+| Поле | Локальная проверка | VPS |
+| --- | --- | --- |
+| Название | `Мой GitHub MCP` | `Мой GitHub MCP` |
+| URL MCP-сервера | `http://127.0.0.1:8000/mcp` | `https://mcp.example.com/mcp` |
+| Переменная окружения с токеном | Пусто без авторизации, иначе `MCP_ACCESS_TOKEN` | `MCP_ACCESS_TOKEN` |
+| Использовать в чате | Включить | Включить |
+
+В поле токена вводится **имя переменной**, а не секрет. Нажмите **Сохранить MCP**,
+затем **Get tools**: каталог должен показать семь инструментов. Закройте панель
+и отправьте в чат, например:
+
+> Через мой GitHub MCP получи сведения о репозитории octocat/Hello-World.
+> Укажи основную ветку, число звёзд и ссылку на репозиторий.
+
+Агент передаёт модели каталог инструментов и схемы параметров. Модель выбирает
+`get_repository` и аргументы `{"owner": "octocat", "repo": "Hello-World"}`;
+приложение отправляет MCP `tools/call`, возвращает результат модели, после чего
+она готовит ответ. В чате можно раскрыть вызовы и проверить аргументы и результат.
+Число звёзд берётся из ответа GitHub, а не из заранее заданного примера.
+
+Другие запросы для проверки:
+
+- «Покажи три последних открытых issue в microsoft/vscode, их номера и ссылки».
+- «Прочитай README.md из octocat/Hello-World и кратко объясни содержимое».
+- «Найди пять популярных репозиториев по запросу language:python stars:>10000».
+
+Настройки подключения общие для диалогов и хранятся в
+`data/conversations/mcp.sqlite3` на стороне приложения. Для удалённого сервера
+агенту требуется только URL и `MCP_ACCESS_TOKEN`. Подробнее: [MCP приложения](../MCP.md).
+
+Для прямой проверки из терминала (из корня проекта):
+
+```powershell
+.\venv\Scripts\python.exe -m llm_agent --mcp-url http://127.0.0.1:8000/mcp --user "Получить сведения о репозитории octocat/Hello-World через MCP"
+```
+
+При авторизации добавьте `--mcp-token-env MCP_ACCESS_TOKEN`; для VPS также
+замените URL на `https://mcp.example.com/mcp`.
+
+### Самостоятельный Python-клиент
 
 Пример вызова из Python с установленными зависимостями проекта:
 
@@ -160,10 +282,21 @@ asyncio.run(main())
 `MCP_ACCESS_TOKEN`; пример клиента намеренно не читает серверный `.env`.
 `GITHUB_TOKEN` агенту передавать не нужно.
 
-В агенте передайте модели имена, описания и схемы из `list_tools()`, выполняйте
-выбранный вызов через `call_tool()` и возвращайте результат модели для подготовки
-ответа. Содержимое GitHub — внешние данные, а не системные инструкции.
-Подключение к конкретному агенту в этом проекте не выполняется.
+Этот короткий пример проверяет сам протокол без LLM. Полный выбор инструмента
+моделью и использование результата реализованы в приложении выше.
+Содержимое GitHub — внешние данные, а не системные инструкции.
+
+### Если подключение не работает
+
+- HTTP 401: проверьте совпадение `MCP_ACCESS_TOKEN` и имя переменной в форме,
+  перезапустите процессы после изменения `.env`.
+- HTTP 421: добавьте домен запроса в `MCP_ALLOWED_HOSTS` сервера без схемы и пути.
+- HTTP 403 по Origin: Python-агент не посылает Origin; если его добавляет другой
+  клиент, внесите точное значение в `MCP_ALLOWED_ORIGINS`.
+- Ошибка GitHub внутри результата инструмента: проверьте `GITHUB_TOKEN` на VPS,
+  права на репозиторий, корректность `owner` / `repo` и лимит GitHub API.
+- Каталог есть, но инструмент недоступен в чате: включите **Использовать в чате**.
+- Логи процесса на VPS: `sudo journalctl -u github-mcp -n 50 --no-pager`.
 
 ## Проверка и структура
 
@@ -172,12 +305,14 @@ asyncio.run(main())
 ```
 
 Тесты проверяют инструменты, ограничения параметров, ошибки, пагинацию, чтение файлов,
-настройки сети и авторизацию. HTTP-тест выполняет initialize → tools/list → tools/call
+компактные ответы без потери описаний в подробном запросе, настройки сети и авторизацию.
+HTTP-тест выполняет initialize → tools/list → tools/call
 через MCP HTTP-клиент и ASGI-приложение. Запросы GitHub подменяются, токен и интернет
 для тестов не нужны.
 
 - `server.py` — регистрация и реализация семи инструментов.
 - `github_api.py` — HTTP-клиент GitHub и обработка ошибок.
+- `github_results.py` — отбор полезных полей GitHub для контекста модели.
 - `http_server.py` — конфигурация, Bearer-авторизация, HTTP-приложение и запуск.
 - `.env.example` — шаблон настроек без секретов.
 
