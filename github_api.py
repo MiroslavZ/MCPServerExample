@@ -12,7 +12,7 @@ class GitHubError(Exception):
     """Ошибка API с безопасным для пользователя сообщением."""
 
 
-async def get(path: str, **params: Any) -> tuple[Any, bool]:
+async def get(path: str, /, **params: Any) -> tuple[Any, bool]:
     """Вернуть JSON и признак следующей страницы; токен не попадает в ошибки."""
     load_dotenv(Path(__file__).with_name(".env"))
     headers = {

@@ -1,6 +1,6 @@
 # GitHub MCP Server
 
-Учебный MCP-сервер на Python 3.11+ и `mcp==2.2.0`. Предоставляет семь инструментов
+Учебный MCP-сервер на Python 3.11+ и `mcp==2.2.0`. Предоставляет восемь инструментов
 для чтения GitHub API через **Streamable HTTP**. Endpoint: `/mcp`.
 Агент может работать на другом компьютере; сервер запускается отдельно.
 
@@ -9,6 +9,7 @@
 | Инструмент | Параметры | Результат |
 | --- | --- | --- |
 | `get_repository` | `owner`, `repo` | Данные репозитория: описание, URL, язык, звёзды, лицензия и основная ветка |
+| `list_commits` | `owner`, `repo`, `sha=null`, `since=null`, `until=null`, `path=null`, `author=null`, `page=1`, `per_page=20` | `commits`: SHA, ссылка, полное сообщение, автор и коммитер с датами; `page`, `next_page` |
 | `search_repositories` | `query`, `page=1`, `per_page=20` | `repositories`, `total_count`, `incomplete_results`, `page`, `next_page` |
 | `list_issues` | `owner`, `repo`, `state="open"`, `page=1`, `per_page=20` | Краткие `issues` без body, `page`, `next_page` |
 | `get_issue` | `owner`, `repo`, `issue_number` | Описание, автор, метки и состояние issue |
@@ -27,6 +28,30 @@
 и `html_url`, метки — объектами с `name` и `description`, ветки PR — `label`, `ref`, `sha`.
 Поля, отсутствующие в GitHub, не добавляются. Полные описания issues/PR доступны
 через `get_issue` / `get_pull_request`, без обрезки; списки не загружают их в контекст LLM.
+
+### Недавние коммиты
+
+Пример аргументов `list_commits` для последних 10 коммитов ветки `main`:
+
+```json
+{"owner": "octocat", "repo": "Hello-World", "sha": "main", "per_page": 10}
+```
+
+Без `sha` читается основная ветка; это история одной ветки, а не всех веток
+репозитория. Для периода используйте `since` и `until` в UTC, например
+`2026-09-20T00:00:00Z`. Поддерживаются годы 1970–2099; `since` не должна быть
+позже `until`. `path` фильтрует историю по файлу, `author` — по логину или email.
+Порядок коммитов сохраняется из GitHub API. Для продолжения передайте `next_page`
+как `page`, сохранив остальные параметры; `null` означает конец выдачи.
+
+В каждом коммите `author` и `committer` содержат имя, email и дату из Git,
+а `author_user` и `committer_user` — логин и ссылку на аккаунт GitHub либо `null`,
+если аккаунт не сопоставлен. Полное сообщение находится в `message`.
+Даты коммитов не являются временем push в GitHub. Diff не загружается.
+Пустая выдача фильтра возвращается как `commits: []`; ошибка GitHub (в том числе
+HTTP 409 для пустого репозитория) возвращается как ошибка инструмента.
+Для приватного репозитория fine-grained токену нужен доступ к репозиторию
+и разрешение **Contents: read**.
 
 Ограничения:
 
@@ -310,7 +335,7 @@ HTTP-тест выполняет initialize → tools/list → tools/call
 через MCP HTTP-клиент и ASGI-приложение. Запросы GitHub подменяются, токен и интернет
 для тестов не нужны.
 
-- `server.py` — регистрация и реализация семи инструментов.
+- `server.py` — регистрация и реализация восьми инструментов.
 - `github_api.py` — HTTP-клиент GitHub и обработка ошибок.
 - `github_results.py` — отбор полезных полей GitHub для контекста модели.
 - `http_server.py` — конфигурация, Bearer-авторизация, HTTP-приложение и запуск.
@@ -319,5 +344,6 @@ HTTP-тест выполняет initialize → tools/list → tools/call
 Документация: [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/),
 [развёртывание MCP](https://py.sdk.modelcontextprotocol.io/run/deploy/),
 [GitHub Contents](https://docs.github.com/en/rest/repos/contents),
+[GitHub Commits](https://docs.github.com/en/rest/commits/commits#list-commits),
 [GitHub Pull requests](https://docs.github.com/en/rest/pulls/pulls),
 [GitHub Search](https://docs.github.com/en/rest/search/search).

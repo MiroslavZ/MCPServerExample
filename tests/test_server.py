@@ -43,12 +43,78 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         self.assertEqual(set(tools), {
             "get_repository", "list_issues", "get_issue", "search_repositories",
-            "list_pull_requests", "get_pull_request", "get_repository_content",
+            "list_pull_requests", "get_pull_request", "get_repository_content", "list_commits",
         })
         schema = tools["list_issues"].input_schema
         self.assertEqual(schema["required"], ["owner", "repo"])
         self.assertEqual(schema["properties"]["per_page"]["maximum"], 100)
         self.assertTrue(schema["properties"]["owner"]["description"])
+
+    async def test_commits_filters_pagination_and_compact_result(self):
+        self.payload = [{
+            "sha": "abc", "html_url": "https://github.com/o/r/commit/abc", "node_id": "unused",
+            "commit": {
+                "message": "Fix bug\n\nFull explanation",
+                "author": {"name": "Author", "email": "a@example.com", "date": "2026-09-20T10:00:00Z"},
+                "committer": {"name": "Committer", "email": "c@example.com", "date": "2026-09-21T11:00:00Z"},
+                "tree": {"sha": "unused"}, "verification": {"signature": "unused"},
+            },
+            "author": None,
+            "committer": {"login": "maintainer", "html_url": "https://github.com/maintainer", "avatar_url": "unused"},
+            "parents": [{"sha": "unused"}],
+        }]
+        self.headers = {"Link": '<https://api.github.com/repos/o/r/commits?page=3>; rel="next"'}
+        filters = {
+            "sha": "feature/docs", "since": "2026-09-01T00:00:00Z", "until": "2026-09-27T00:00:00Z",
+            "path": "docs/a #?.txt", "author": "a@example.com", "page": 2, "per_page": 10,
+        }
+        result = await self.call_tool("list_commits", {"owner": "o", "repo": "r", **filters})
+        self.assertFalse(result.is_error)
+        self.assertEqual(self.requests[-1].url.path, "/repos/o/r/commits")
+        self.assertEqual(dict(self.requests[-1].url.params), {key: str(value) for key, value in filters.items()})
+        self.assertEqual(result.structured_content, {
+            "commits": [{
+                "sha": "abc", "html_url": "https://github.com/o/r/commit/abc",
+                "message": "Fix bug\n\nFull explanation",
+                "author": self.payload[0]["commit"]["author"],
+                "committer": self.payload[0]["commit"]["committer"],
+                "author_user": None,
+                "committer_user": {"login": "maintainer", "html_url": "https://github.com/maintainer"},
+            }],
+            "page": 2, "next_page": 3,
+        })
+
+    async def test_commits_defaults_and_empty_results(self):
+        self.payload = []
+        result = await self.call_tool("list_commits", {"owner": "o", "repo": "r"})
+        self.assertFalse(result.is_error)
+        self.assertEqual(dict(self.requests[-1].url.params), {"page": "1", "per_page": "20"})
+        self.assertEqual(result.structured_content, {"commits": [], "page": 1, "next_page": None})
+        self.payload = [{"sha": "abc", "commit": {"message": "Initial", "author": None, "committer": None}}]
+        result = await self.call_tool("list_commits", {"owner": "o", "repo": "r"})
+        self.assertFalse(result.is_error)
+        self.assertIsNone(result.structured_content["commits"][0]["author"])
+
+    async def test_invalid_commit_filters_do_not_reach_github(self):
+        for filters in (
+            {"since": "2026-02-30T00:00:00Z"}, {"until": "yesterday"},
+            {"since": "2026-09-01"}, {"since": "1969-12-31T23:59:59Z"},
+            {"until": "2100-01-01T00:00:00Z"},
+            {"since": "2026-09-27T00:00:00Z", "until": "2026-09-01T00:00:00Z"},
+            {"sha": ""}, {"author": ""}, {"path": ""}, {"page": 0}, {"per_page": 101},
+        ):
+            with self.subTest(filters=filters):
+                result = await self.call_tool("list_commits", {"owner": "o", "repo": "r", **filters})
+                self.assertTrue(result.is_error)
+        self.assertEqual(self.requests, [])
+
+    async def test_commits_api_errors(self):
+        for status in (404, 409, 422, 429):
+            with self.subTest(status=status):
+                self.status = status
+                result = await self.call_tool("list_commits", {"owner": "o", "repo": "r"})
+                self.assertTrue(result.is_error)
+                self.assertIn(str(status), result.content[0].text)
 
     async def test_repository_result_and_auth(self):
         result = await self.call_tool("get_repository", {"owner": "octocat", "repo": "Hello-World"})

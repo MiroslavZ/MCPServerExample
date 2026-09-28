@@ -26,6 +26,17 @@ def repository(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def commit(data: dict[str, Any]) -> dict[str, Any]:
+    result = _select(data, "sha", "html_url")
+    details = data["commit"]
+    result.update(_select(details, "message"))
+    for role in ("author", "committer"):
+        identity = details.get(role)
+        result[role] = _select(identity, "name", "email", "date") if identity is not None else None
+        result[f"{role}_user"] = _user(data.get(role))
+    return result
+
+
 def issue(data: dict[str, Any], *, details: bool = False) -> dict[str, Any]:
     result = _select(
         data, "number", "title", "state", "state_reason", "html_url",

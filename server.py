@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
@@ -14,7 +15,7 @@ import github_api
 import github_results
 
 
-mcp = MCPServer("github", instructions="Поиск репозиториев, чтение файлов, issues и pull requests через GitHub API.")
+mcp = MCPServer("github", instructions="Поиск репозиториев, чтение коммитов, файлов, issues и pull requests через GitHub API.")
 read_only = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 
 Owner = Annotated[str, Field(description="Логин владельца или организации GitHub", pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*$", max_length=100)]
@@ -22,9 +23,13 @@ Repo = Annotated[str, Field(description="Имя репозитория без в
 IssueNumber = Annotated[int, Field(description="Номер issue в репозитории", ge=1)]
 Page = Annotated[int, Field(description="Номер страницы, начиная с 1", ge=1)]
 PerPage = Annotated[int, Field(description="Размер страницы GitHub API, от 1 до 100", ge=1, le=100)]
+CommitDate = Annotated[str, Field(
+    description="Дата UTC в формате YYYY-MM-DDTHH:MM:SSZ, годы 1970–2099",
+    pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+)]
 
 
-async def _get(path: str, **params: Any) -> tuple[Any, bool]:
+async def _get(path: str, /, **params: Any) -> tuple[Any, bool]:
     try:
         return await github_api.get(path, **params)
     except github_api.GitHubError as error:
@@ -36,6 +41,47 @@ async def get_repository(owner: Owner, repo: Repo) -> dict[str, Any]:
     """Получить сведения о репозитории: описание, URL, язык, звёзды и ветку по умолчанию."""
     data, _ = await _get(f"/repos/{owner}/{repo}")
     return github_results.repository(data)
+
+
+@mcp.tool(annotations=read_only)
+async def list_commits(
+    owner: Owner,
+    repo: Repo,
+    sha: Annotated[str | None, Field(description="Ветка или SHA, откуда читать историю; по умолчанию основная ветка", min_length=1)] = None,
+    since: CommitDate | None = None,
+    until: CommitDate | None = None,
+    path: Annotated[str | None, Field(description="Фильтр по пути файла внутри репозитория", min_length=1, max_length=4096)] = None,
+    author: Annotated[str | None, Field(description="Логин GitHub или email автора коммитов", min_length=1)] = None,
+    page: Page = 1,
+    per_page: PerPage = 20,
+) -> dict[str, Any]:
+    """Получить недавние коммиты выбранной ветки с сообщениями, авторами и датами.
+
+    Возвращает историю от выбранного SHA/ветки, а не коммиты всех веток.
+    Порядок соответствует GitHub API; продолжение доступно через next_page.
+    Даты коммитов не означают время их отправки в GitHub. Diff не загружается.
+    """
+    for name, value in (("since", since), ("until", until)):
+        if value is not None:
+            try:
+                date = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                raise ToolError(f"{name}: укажите корректную дату UTC в формате YYYY-MM-DDTHH:MM:SSZ.") from None
+            if not 1970 <= date.year <= 2099:
+                raise ToolError(f"{name}: год должен быть в диапазоне 1970–2099.")
+    if since is not None and until is not None and since > until:
+        raise ToolError("since не должна быть позже until.")
+    params = {name: value for name, value in {
+        "sha": sha, "since": since, "until": until, "path": path, "author": author,
+    }.items() if value is not None}
+    data, has_next = await _get(
+        f"/repos/{owner}/{repo}/commits", page=page, per_page=per_page, **params,
+    )
+    return {
+        "commits": [github_results.commit(item) for item in data],
+        "page": page,
+        "next_page": page + 1 if has_next else None,
+    }
 
 
 @mcp.tool(annotations=read_only)

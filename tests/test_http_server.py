@@ -59,7 +59,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
                         async with ClientSession(*streams) as client:
                             await client.initialize()
                             tools = (await client.list_tools()).tools
-                            self.assertEqual(len(tools), 7)
+                            self.assertEqual(len(tools), 8)
                             repository_tool = next(tool for tool in tools if tool.name == "get_repository")
                             self.assertEqual(repository_tool.input_schema["required"], ["owner", "repo"])
                             self.assertTrue(repository_tool.annotations.read_only_hint)
@@ -71,3 +71,12 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
                             self.assertFalse(result.is_error)
                             self.assertEqual(result.structured_content, {"full_name": "o/r"})
                             github.assert_awaited_once_with("/repos/o/r")
+                            github.return_value = ([], False)
+                            result = await client.call_tool("list_commits", {
+                                "owner": "o", "repo": "r", "sha": "main", "per_page": 10,
+                            })
+                            self.assertFalse(result.is_error)
+                            self.assertEqual(result.structured_content, {
+                                "commits": [], "page": 1, "next_page": None,
+                            })
+                            github.assert_awaited_with("/repos/o/r/commits", page=1, per_page=10, sha="main")
