@@ -44,6 +44,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(tools), {
             "get_repository", "list_issues", "get_issue", "search_repositories",
             "list_pull_requests", "get_pull_request", "get_repository_content", "list_commits",
+            "summarize", "save_to_file",
         })
         schema = tools["list_issues"].input_schema
         self.assertEqual(schema["required"], ["owner", "repo"])

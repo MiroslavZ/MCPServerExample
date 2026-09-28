@@ -59,7 +59,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
                         async with ClientSession(*streams) as client:
                             await client.initialize()
                             tools = (await client.list_tools()).tools
-                            self.assertEqual(len(tools), 8)
+                            self.assertEqual(len(tools), 10)
                             repository_tool = next(tool for tool in tools if tool.name == "get_repository")
                             self.assertEqual(repository_tool.input_schema["required"], ["owner", "repo"])
                             self.assertTrue(repository_tool.annotations.read_only_hint)

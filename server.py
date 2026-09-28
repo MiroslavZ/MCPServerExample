@@ -8,14 +8,25 @@ from urllib.parse import quote
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, ToolAnnotations
 from pydantic import Field
 
-import github_api
-import github_results
+if __package__:
+    from . import github_api, github_results, pipeline_tools
+else:
+    import github_api
+    import github_results
+    import pipeline_tools
 
 
-mcp = MCPServer("github", instructions="Поиск репозиториев, чтение коммитов, файлов, issues и pull requests через GitHub API.")
+mcp = MCPServer("github", instructions=(
+    "Поиск репозиториев, чтение коммитов, файлов, issues и pull requests через GitHub API; "
+    "обработка данных через summarize и сохранение текста через save_to_file. "
+    "Для сводки в файле сначала получи данные подходящим инструментом GitHub, "
+    "передай его результат в summarize.data, затем summary из ответа — в save_to_file.content. "
+    "Зависимые вызовы выполняй последовательно, после получения результата предыдущего инструмента. "
+    "Не подменяй результаты примерами. Ошибка инструмента не является данными для следующего шага."
+))
 read_only = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 
 Owner = Annotated[str, Field(description="Логин владельца или организации GitHub", pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*$", max_length=100)]
@@ -210,7 +221,49 @@ async def get_repository_content(
         return github_results.content(data)
 
 
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=False))
+async def summarize(
+    data: Annotated[str | dict[str, Any] | list[Any], Field(description=(
+        "Фактические данные из результата предыдущего инструмента: текст, JSON-объект или массив; "
+        "до 200000 символов после JSON-сериализации. Сервер принимает содержимое данных, а не их описание."
+    ))],
+    instructions: Annotated[str, Field(
+        description="Требования к сводке: язык, акценты, формат; до 4000 символов",
+        min_length=1, max_length=pipeline_tools.MAX_INSTRUCTIONS_LENGTH,
+    )] = pipeline_tools.DEFAULT_INSTRUCTIONS,
+) -> dict[str, str]:
+    """Суммаризовать переданные данные через LLM на сервере. Вернуть текст в поле summary.
+
+    Для сохранения сводки передайте summary следующему инструменту save_to_file как content.
+    Ошибки API, пустой или незавершённый ответ возвращаются как ошибка инструмента.
+    """
+    return await pipeline_tools.summarize_data(data, instructions)
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False))
+def save_to_file(
+    content: Annotated[str, Field(
+        description="Точный текст для сохранения, например поле summary ответа summarize",
+        max_length=pipeline_tools.MAX_TEXT_LENGTH,
+    )],
+    filename: Annotated[str, Field(
+        description="Имя .txt файла без пути, например summary.txt; до 100 символов",
+        min_length=1, max_length=100,
+    )] = "summary.txt",
+) -> CallToolResult:
+    """Сохранить content в UTF-8 TXT без изменений и вернуть готовый файл как embedded resource.
+
+    Возвращает filename, uri, size_bytes и sha256. Каждый вызов создаёт отдельный файл,
+    не перезаписывая предыдущий. Для скачивания используйте вложенное содержимое ресурса:
+    file URI относится к машине MCP-сервера и не является HTTP-ссылкой.
+    """
+    return pipeline_tools.save_text_file(content, filename)
+
+
 if __name__ == "__main__":
-    from http_server import run
+    if __package__:
+        from .http_server import run
+    else:
+        from http_server import run
 
     run(mcp)
