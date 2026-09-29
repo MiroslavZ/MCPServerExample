@@ -49,7 +49,7 @@ class Settings:
         load_dotenv(Path(__file__).with_name(".env"))
         settings = cls(
             host=os.getenv("MCP_HOST", "127.0.0.1").strip(),
-            port=int(os.getenv("MCP_PORT", "8000")),
+            port=int(os.getenv("MCP_PORT", str(cls.port))),
             access_token=os.getenv("MCP_ACCESS_TOKEN", "").strip(),
         )
         for attribute in ("allowed_hosts", "allowed_origins"):

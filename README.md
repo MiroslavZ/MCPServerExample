@@ -399,7 +399,7 @@ HTTP-тест выполняет initialize → tools/list → tools/call
 - `pipeline_tools.py` — клиент LLM для суммаризации и выдача текстовых файлов.
 - `github_api.py` — HTTP-клиент GitHub и обработка ошибок.
 - `github_results.py` — отбор полезных полей GitHub для контекста модели.
-- `http_server.py` — конфигурация, Bearer-авторизация, HTTP-приложение и запуск.
+- `http_server.py` — HTTP-транспорт, Bearer-авторизация и запуск с локальным `.env`.
 - `.env.example` — шаблон настроек без секретов.
 
 Документация: [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/),
